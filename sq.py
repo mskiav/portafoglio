@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Report portafoglio Swissquote — tutto in un file.
-   Uso:  python3 sq.py [AAAA-MM-GG] [ora]"""
+   Uso:  python3 sq.py [AAAA-MM-GG] [ora]
+   Generato da build.py: non modificare qui, modificare i sorgenti."""
 import json, os, sys, subprocess
 from datetime import date, datetime, timedelta
 
@@ -237,7 +238,7 @@ def periodi(B, tot_eur, rif):
 
 
 # ───────────────────── memoria giornaliera ─────────────────────
-def serie(B, oggi, FX=None, S=None):
+def serie(B, oggi, FX=None, S=None, tot=None):
     """Registra prezzi e cuscini di ogni sera. Serve al delta del cuscino e,
     dopo qualche settimana, alla volatilita dei sottostanti calcolata sui
     propri dati invece che comprata fuori."""
@@ -255,6 +256,7 @@ def serie(B, oggi, FX=None, S=None):
                     r.update({'sotto': it['sotto'], 'cuscino': round(it['cuscino'], 5)})
                 riga[k] = r
     riga['_fx'] = {k: round(x, 6) for k, x in (FX or {}).items()}
+    if tot is not None: riga['_tot'] = round(tot, 2)
     S[g] = riga
     # variazione del cuscino rispetto all'ultima sera registrata
     prec = [d for d in sorted(S) if d < g]
@@ -262,7 +264,9 @@ def serie(B, oggi, FX=None, S=None):
     ieri = S[prec[-1]]
     return S, {k: (riga[k]['cuscino'] - ieri[k]['cuscino'])
                for k in riga
-               if k in ieri and 'cuscino' in riga[k] and 'cuscino' in ieri[k]}
+               if not k.startswith('_') and k in ieri
+               and isinstance(riga[k], dict) and isinstance(ieri[k], dict)
+               and 'cuscino' in riga[k] and 'cuscino' in ieri[k]}
 
 
 # ═════════════════════ RENDER ═════════════════════
@@ -733,6 +737,14 @@ def render_app(B, FX, FXP, oggi, ora, pos, per, fs=None, dcus=None):
 
 
 # ═════════════════════ MAIN ═══════════════════════
+"""Report giornaliero. Legge prezzi2.json, scrive report.html e report.png.
+   Uso:  python3 run.py [AAAA-MM-GG] [ora]"""
+import json, sys, os, subprocess
+from datetime import date, datetime
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+P = lambda f: os.path.join(BASE, f)
+
 def main():
     oggi = date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else date.today()
     ora  = sys.argv[2] if len(sys.argv) > 2 else datetime.now().strftime('%H:%M')
@@ -742,23 +754,30 @@ def main():
     S_prec = D.get('serie', {})
 
     # ── rete di sicurezza: prezzo assente o fuori scala -> uso l'ultimo buono ──
-    prec = S_prec.get(sorted(S_prec)[-1], {}) if S_prec else {}
+    gg_prec = [d for d in sorted(S_prec) if d < oggi.isoformat()]
+    prec = S_prec[gg_prec[-1]] if gg_prec else {}
     recuperati, sospetti = [], []
     for k, v in list(pz.items()):
         if k.startswith('_'): continue
         old = (prec.get(k) or {}).get('px')
-        if v.get('px') is None and old:
-            pz[k] = {'px': old, 'prev': old, 'stimato': True}; recuperati.append(k)
-        elif v.get('px') and old and abs(v['px'] / old - 1) > 0.15:
-            sospetti.append(f"{k} {old} -> {v['px']}")
+        px = v.get('px')
+        # None, zero e negativi sono tutti "prezzo non arrivato". Lo zero e il caso
+        # insidioso: non e None e in piu e falsy, quindi passava indenne entrambi i
+        # controlli e azzerava la posizione senza un avviso — IWDS il 27.08.2026,
+        # 33'000 EUR spariti dal patrimonio.
+        if px is None or not isinstance(px, (int, float)) or px <= 0:
+            if old: pz[k] = {'px': old, 'prev': old, 'stimato': True}; recuperati.append(k)
+            else:   pz[k] = {'px': None}; recuperati.append(k + ' (nessuno storico)')
+        elif old and abs(px / old - 1) > 0.15:
+            sospetti.append(f"{k} {old} -> {px}")
             pz[k] = {'px': old, 'prev': old, 'stimato': True}
-        elif v.get('px') and v.get('prev') is None and old:
+        elif v.get('prev') is None and old:
             pz[k]['prev'] = old                      # 1G calcolato sulla mia serie
 
     B, FX, FXP = build(pos, pz, oggi, D['costo_eur'])
     tot = sum(b['val_eur'] for b in B.values())
     Per = periodi(B, tot, D['riferimenti'])
-    S_new, dcus = serie(B, oggi, FX, S_prec)
+    S_new, dcus = serie(B, oggi, FX, S_prec, tot)
 
     html = render(B, FX, FXP, oggi, ora, pos,
                           {k: Per['TOT'][k] for k in ('MTD', 'QTD', 'YTD')},
@@ -775,10 +794,16 @@ def main():
         except Exception as e: print('screenshot saltato:', e)
 
     print(f"{oggi} {ora} · patrimonio {tot:,.0f} EUR · 1G {sum(b['val_eur']-b['prev_eur'] for b in B.values()):+,.0f}")
+    # il patrimonio dell'ultima sera archiviata: un salto oltre il 2% non e un
+    # movimento di mercato ma un prezzo sbagliato
+    ti = prec.get('_tot')
+    if ti and abs(tot / ti - 1) > 0.02:
+        print(f"!! ATTENZIONE: {tot:,.0f} contro {ti:,.0f} del {gg_prec[-1]} "
+              f"({(tot/ti-1)*100:+.2f}%). Un salto simile non e un movimento di mercato: "
+              f"controlla i prezzi prima di pubblicare.")
     print(f"MTD {Per['TOT']['MTD']:+.2%} · QTD {Per['TOT']['QTD']:+.2%} · YTD {Per['TOT']['YTD']:+.2%}")
     if recuperati: print('prezzi non arrivati, usato ieri:', ', '.join(recuperati))
     if sospetti:   print('prezzi scartati perche fuori scala:', ' | '.join(sospetti))
-
 
 
 if __name__ == '__main__':
