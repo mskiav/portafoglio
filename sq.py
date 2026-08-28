@@ -757,6 +757,16 @@ def main():
     gg_prec = [d for d in sorted(S_prec) if d < oggi.isoformat()]
     prec = S_prec[gg_prec[-1]] if gg_prec else {}
     recuperati, sospetti = [], []
+    # Un ticker OMESSO da prezzi2.json non compariva in pz.items() e non veniva mai
+    # visitato: la rete di sicurezza non scattava e build() azzerava la posizione.
+    # Il 28.08.2026 cinque ticker omessi valevano 110'000 EUR, -9.12% sul patrimonio.
+    # Qui l'elenco di cio che il report si aspetta viene dalle posizioni, non dai prezzi.
+    attesi  = [t['tk'] for t in pos['titoli']]
+    attesi += [c['tk'] for c in pos['certificati']]
+    attesi += [c['sottostante'] for c in pos['certificati'] if c.get('sottostante')]
+    if pos.get('invest_easy'): attesi.append('AMBTSQ')
+    for k in attesi:
+        if k not in pz: pz[k] = {'px': None}
     for k, v in list(pz.items()):
         if k.startswith('_'): continue
         old = (prec.get(k) or {}).get('px')
