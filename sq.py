@@ -473,6 +473,7 @@ def render(B, FX, FXP, oggi, ora, pos, per, storico, fs=None, dcus=None):
         if not S.get(cat): continue
         h.append(f'<span><span class="dot" style="background:var({COL[cat]})"></span>{cat} {f(S[cat])}</span>')
     h.append('</div></div>')
+    h.append(sez_fisco(pos))
     h.append(f'''<p class="note">
 <b>Inizio</b>: P&amp;L sul capitale investito, cassa inclusa e realizzi compresi ({f(real,'+')} EUR dalle chiusure del 21.08).<br>
 <b>Obbligazionario</b> a costo ammortizzato sul rendimento di carico, mai a mercato.<br>
@@ -589,6 +590,47 @@ def allerta(B, FX, FXP, dcus, pos):
     return ''.join(h) + '</div>'
 
 
+# ───────────────────── posizione fiscale su cedole e dividendi ─────────────────────
+def sez_fisco(pos):
+    """Ritenute gia subite sugli incassi, divise per quello che torna indietro e
+    quello che resta. Serve a leggere il rendimento in due modi: al netto come lo
+    vedi sul conto, e al lordo del recuperabile, che e il rendimento vero se la
+    dichiarazione va a buon fine."""
+    inc = pos.get('incassi')
+    if not inc: return ''
+    t = inc.get('tasse', {})
+    rimb = t.get('rimborsabile_eur', 0)
+    c_it = t.get('credito_it_eur', 0)
+    c_us = t.get('credito_us_eur', 0)
+    tot  = t.get('totale_eur', rimb + c_it + c_us)
+    lordo, netto = inc.get('lordo_eur', 0), inc.get('netto_eur', 0)
+    chiuse = inc.get('da_posizioni_chiuse_eur', 0)
+    h = ['<div class="card"><h2>Incassi e posizione fiscale</h2><table class="num">']
+    h.append('<tr><th></th><th>EUR</th><th></th></tr>')
+    h.append(f'<tr class="cat"><td>Incassi lordi</td><td>{f(lordo)}</td>'
+             f'<td class="w">cedole, dividendi, interessi</td></tr>')
+    h.append(f'<tr class="it"><td>di cui da posizioni chiuse</td><td>{f(chiuse)}</td>'
+             f'<td class="w">EDF, deposito 01/26, XSLI, NESN, CSSMIM</td></tr>')
+    h.append(f'<tr class="it"><td>ritenute subite</td><td class="dn">−{f(tot)}</td><td></td></tr>')
+    h.append(f'<tr class="tot"><td>Incassi netti in cassa</td><td>{f(netto)}</td><td></td></tr>')
+    h.append(f'<tr class="cat sep"><td>Recuperabile</td><td class="up">{f(rimb)}</td>'
+             f'<td class="w">imposta preventiva CH 35%</td></tr>')
+    h.append(f'<tr class="cat"><td>Credito d\'imposta</td><td>{f(c_it + c_us)}</td>'
+             f'<td class="w">ritenute estere</td></tr>')
+    h.append(f'<tr class="it"><td>Italia 12.5% su cedole</td><td>{f(c_it)}</td><td></td></tr>')
+    us_l, us_t = t.get('us_lordo_usd', 0), t.get('us_trattenuto_usd', 0)
+    al = f' <span class="w">{us_t/us_l*100:.0f}% su {us_l:.2f} USD lordi</span>' if us_l else ''
+    h.append(f'<tr class="it"><td>USA su dividendi</td><td>{f(c_us)}</td><td class="w">{al}</td></tr>')
+    h.append('</table>')
+    if us_l and us_t / us_l > 0.20:
+        h.append('<div class="crtnote">Sui dividendi USA e trattenuto il '
+                 f'{us_t/us_l*100:.0f}%. Gli estratti non dichiarano l\'aliquota, ma la '
+                 'convenzione CH-USA con W-8BEN prevede il 15%: da verificare con Swissquote.</div>')
+    h.append(f'<div class="foot"><span>Patrimonio al lordo del recuperabile</span>'
+             f'<span class="num">+{f(rimb)} EUR</span></div>')
+    return ''.join(h) + '</div>'
+
+
 # ═══════════════ versione consultabile: header fisso e pannelli ═══════════════
 CSS_APP = """
 .app{max-width:520px;margin:0 auto;padding:0 12px 90px}
@@ -697,7 +739,7 @@ def render_app(B, FX, FXP, oggi, ora, pos, per, fs=None, dcus=None):
         h.append(f'''<tr class="cat"><td>{v}</td><td>{f(b['val_eur'])}</td>
 <td>{b['val_eur']/tot*100:.1f}%</td><td class="{k(b['d_eur'])}">{p(b['d_eur'])}</td>
 <td class="{k(pe.get('YTD'))}">{p(pe.get('YTD'))}</td></tr>''')
-    h.append('</table></div></div>')
+    h.append('</table></div>' + sez_fisco(pos) + '</div>')
 
     # un pannello per valuta
     for v in ['CHF', 'EUR', 'USD']:
