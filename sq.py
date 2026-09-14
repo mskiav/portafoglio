@@ -214,26 +214,47 @@ def build(pos, prezzi, oggi, costo_eur=None):
 
 
 # ───────────────────── rendimenti di periodo ─────────────────────
-def periodi(B, tot_eur, rif):
-    """MTD/QTD/YTD da indice TWR base 100. Le celle di categoria restano vuote:
-    dentro un blocco le categorie si scambiano capitale di continuo e un rapporto
-    di valori non sarebbe un rendimento."""
+def date_riferimento(oggi):
+    """Le tre date da cui si misura, scelte per CALENDARIO e non per posizione nella
+    serie. La versione precedente prendeva l'ultimo punto disponibile come base del
+    MTD: con la serie ferma al 31.07, a settembre l'MTD usciva su quaranta giorni."""
+    m = date(oggi.year, oggi.month, 1) - timedelta(days=1)
+    q = date(oggi.year, 3 * ((oggi.month - 1) // 3) + 1, 1) - timedelta(days=1)
+    return {'MTD': m.isoformat(), 'QTD': q.isoformat(),
+            'YTD': date(oggi.year - 1, 12, 31).isoformat()}
+
+
+def periodi(B, tot_eur, rif, oggi):
+    """MTD/QTD/YTD da indice TWR base 100, per il totale, per i blocchi e per le
+    categorie. Una categoria che non esisteva alla data di riferimento non ha quel
+    periodo: torna None e il render mette un trattino, non uno zero."""
     S = rif['serie']
+    FD = rif.get('_flussi_categoria_dopo', {})
+    RIF = date_riferimento(oggi)
+
     def calc(key, val_oggi):
         s = S.get(key)
         if not s: return {}
-        dd = sorted(s)
-        ult = dd[-1]
-        idx = s[ult]['idx'] * (val_oggi / s[ult]['val'])
+        ult = sorted(s)[-1]
+        v0 = s[ult]['val']
+        # capitale entrato o uscito dopo l'ultimo riferimento: e flusso, non rendimento.
+        # Sui blocchi e sul totale vale zero e il calcolo resta il rapporto di prima.
+        f = FD.get(key, 0.0)
+        base = v0 + f * 0.5
+        idx = s[ult]['idx'] * (1 + (val_oggi - v0 - f) / base) if base else s[ult]['idx']
         def da(d):
             return (idx / s[d]['idx'] - 1) if d in s else None
-        # ultimo fine mese, ultimo fine trimestre, fine anno precedente
-        return {'MTD': da(dd[-1]), 'QTD': da(dd[-2]) if len(dd) > 2 else da(dd[0]),
-                'YTD': da(dd[0]), 'idx': idx}
+        return {x: da(RIF[x]) for x in ('MTD', 'QTD', 'YTD')} | {'idx': idx}
+
     out = {'TOT': calc('TOT', tot_eur)}
     for v, b in B.items():
         out[v] = {'loc': calc(f'{v}_loc', b['val']), 'eur': calc(f'{v}_eur', b['val_eur'])}
         b['per_loc'] = out[v]['loc']; b['per_eur'] = out[v]['eur']
+        for cat, c in b['cat'].items():
+            # Sulla cassa il periodo non si mostra: in valuta locale il rendimento e
+            # zero per costruzione, e quello che si misurerebbe davvero e il residuo di
+            # cio che non e modellato (spese con la carta, competenze, arrotondamenti).
+            c['per'] = {} if cat == 'Cash' else calc(f"{v}_{cat}".replace(' ', '_'), c['val'])
     return out
 
 
@@ -370,6 +391,9 @@ def scheda(v, b, tot_eur, per, cmt=''):
 <div class="vsub"><span class="num">{f(b['val'])} {v} · {b['val_eur']/tot_eur*100:.1f}% del patrimonio</span>
 <span class="num {k(b['d_loc'])}">{'▲' if b['d_loc']>=0 else '▼'} {p(b['d_loc'])}%</span></div>
 <div class="tw"><table class="num"><tr><th></th><th>Valore {v}</th><th>Inizio</th><th>1G</th><th>MTD</th><th>QTD</th><th>YTD</th></tr>''']
+    celcat = lambda d: ''.join(
+        (f'<td class="{k(d[x])}">{p(d[x])}</td>' if d.get(x) is not None
+         else '<td class="w">—</td>') for x in ('MTD', 'QTD', 'YTD'))
     first = True
     for cat in ORD:
         c = b['cat'].get(cat)
@@ -381,7 +405,7 @@ def scheda(v, b, tot_eur, per, cmt=''):
         sep = '' if first else ' sep'; first = False
         h.append(f'''<tr class="cat{sep}"><td><span class="dot" style="background:var({COL[cat]})"></span>{cat}<br><span class="w">{sub}</span></td>
 <td>{f(c['val'])}</td><td class="{k(ini)}">{p(ini)}</td><td class="{k(c['d'])}">{p(c['d'])}</td>
-<td colspan="3"></td></tr>''')
+{celcat(c.get('per') or {})}</tr>''')
         for it in sorted(c['it'], key=lambda x: -x['val'])[:6]:
             if it.get('manca'):
                 h.append(f'''<tr class="it"><td>{it['nome']}</td><td colspan="6" style="text-align:right;color:var(--warn)">prezzo non recuperato</td></tr>'''); continue
@@ -480,8 +504,13 @@ def render(B, FX, FXP, oggi, ora, pos, per, storico, fs=None, dcus=None):
 <b>Cash</b>: il rendimento è solo effetto cambio dal carico medio; in valuta locale è zero per costruzione.<br>
 <b>Cassa attesa</b>: cedole dei bond al loro YTM più cedole dei certificati, sui prossimi 12 mesi.<br>
 <b>MTD, QTD e YTD</b> sono TWR sulla composizione storica del portafoglio, ricostruita dagli estratti conto:
-partono dal 31.12.2025 e includono gli strumenti nel frattempo usciti. Non compaiono sulle categorie perché
-dentro un blocco si scambiano capitale di continuo e un rapporto di valori non sarebbe un rendimento.
+partono dal 31.12.2025 e includono gli strumenti nel frattempo usciti. Le date da cui si misura sono l'ultimo
+fine mese, l'ultimo fine trimestre e il 31.12 precedente.<br>
+<b>Categorie</b>: il rendimento è per contenitore, con Modified Dietz sui capitali che entrano ed escono —
+dentro un blocco le categorie se li scambiano di continuo e un rapporto di valori non basterebbe. La serie del
+contenitore è continua, gli strumenti dentro no: i Certificati CHF al 30.06 erano ADYISQ, oggi sono i due
+Julius Baer. Un <b>trattino</b> non è uno zero: significa che a quella data la categoria non esisteva —
+l'Obbligazionario CHF e USD sono nati il 25.08.2026, le Materie prime CHF il 09.09.2026.
 </p></div></body></html>''')
     return ''.join(h)
 
@@ -828,7 +857,7 @@ def main():
 
     B, FX, FXP = build(pos, pz, oggi, D['costo_eur'])
     tot = sum(b['val_eur'] for b in B.values())
-    Per = periodi(B, tot, D['riferimenti'])
+    Per = periodi(B, tot, D['riferimenti'], oggi)
     S_new, dcus = serie(B, oggi, FX, S_prec, tot)
 
     html = render(B, FX, FXP, oggi, ora, pos,
