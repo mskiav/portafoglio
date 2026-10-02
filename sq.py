@@ -838,6 +838,20 @@ def main():
     if pos.get('invest_easy'): attesi.append('AMBTSQ')
     for k in attesi:
         if k not in pz: pz[k] = {'px': None}
+    # Da quanti giorni e fermo l'ultimo prezzo VERO di ogni ticker. Serve alla soglia
+    # della rete: l'archivio non e piu giornaliero (il report gira a richiesta) e un
+    # buco di dieci giorni rende il 15% fisso troppo stretto. Peggio: un prezzo
+    # scartato viene ricopiato con stimato=True e diventa il riferimento del giorno
+    # dopo, quindi ogni scarto rende il prossimo scarto piu probabile. ADA e rimasta
+    # a 0.1787 dal 14.09 al 02.10 scartando tre prezzi della banca di fila.
+    def ancora(k):
+        """(prezzo, giorni) dell'ultima rilevazione non stimata di k."""
+        for g in reversed(gg_prec):
+            r = (S_prec[g].get(k) or {})
+            if r.get('px') and not r.get('stimato'):
+                return r['px'], (oggi - date.fromisoformat(g)).days
+        return (prec.get(k) or {}).get('px'), 1
+
     for k, v in list(pz.items()):
         if k.startswith('_'): continue
         old = (prec.get(k) or {}).get('px')
@@ -849,11 +863,17 @@ def main():
         if px is None or not isinstance(px, (int, float)) or px <= 0:
             if old: pz[k] = {'px': old, 'prev': old, 'stimato': True}; recuperati.append(k)
             else:   pz[k] = {'px': None}; recuperati.append(k + ' (nessuno storico)')
-        elif old and abs(px / old - 1) > 0.15:
-            sospetti.append(f"{k} {old} -> {px}")
-            pz[k] = {'px': old, 'prev': old, 'stimato': True}
-        elif v.get('prev') is None and old:
-            pz[k]['prev'] = old                      # 1G calcolato sulla mia serie
+        else:
+            # Soglia 15% su un giorno, allargata con la radice del numero di giorni
+            # (la volatilita scala con sqrt(t)), con un tetto al 60%. Il confronto e
+            # sull'ultimo prezzo vero, non sull'ultimo ricopiato.
+            rif, gg = ancora(k)
+            sg = min(0.60, 0.15 * max(1.0, gg) ** 0.5)
+            if rif and abs(px / rif - 1) > sg:
+                sospetti.append(f"{k} {rif} -> {px} ({gg} gg, soglia {sg:.0%})")
+                pz[k] = {'px': old or rif, 'prev': old or rif, 'stimato': True}
+            elif v.get('prev') is None and old:
+                pz[k]['prev'] = old                  # 1G calcolato sulla mia serie
 
     B, FX, FXP = build(pos, pz, oggi, D['costo_eur'])
     tot = sum(b['val_eur'] for b in B.values())
@@ -882,7 +902,10 @@ def main():
         print(f"!! ATTENZIONE: {tot:,.0f} contro {ti:,.0f} del {gg_prec[-1]} "
               f"({(tot/ti-1)*100:+.2f}%). Un salto simile non e un movimento di mercato: "
               f"controlla i prezzi prima di pubblicare.")
-    print(f"MTD {Per['TOT']['MTD']:+.2%} · QTD {Per['TOT']['QTD']:+.2%} · YTD {Per['TOT']['YTD']:+.2%}")
+    # Un periodo esce None quando manca il punto di riferimento nella serie TWR (tipico
+    # il 1 del mese se nessun report e girato a fine mese): si stampa n.d., non si rompe.
+    pf = lambda x: f"{x:+.2%}" if x is not None else "n.d."
+    print(f"MTD {pf(Per['TOT']['MTD'])} · QTD {pf(Per['TOT']['QTD'])} · YTD {pf(Per['TOT']['YTD'])}")
     if recuperati: print('prezzi non arrivati, usato ieri:', ', '.join(recuperati))
     if sospetti:   print('prezzi scartati perche fuori scala:', ' | '.join(sospetti))
 
