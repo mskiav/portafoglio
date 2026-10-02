@@ -214,6 +214,37 @@ def build(pos, prezzi, oggi, costo_eur=None):
 
 
 # ───────────────────── rendimenti di periodo ─────────────────────
+def xirr(flussi, lo=-0.9, hi=5.0, giri=200):
+    """Tasso che annulla il valore attuale di `flussi` = [(data, importo)].
+    Bisezione e non Newton: monotona, non diverge e non ha bisogno di una stima
+    iniziale. Convenzione: i conferimenti sono NEGATIVI (escono dalla tasca di
+    Marco), il patrimonio di oggi e il flusso terminale positivo."""
+    d0 = min(d for d, _ in flussi)
+    va = lambda r: sum(v / (1 + r) ** ((d - d0).days / 365.0) for d, v in flussi)
+    if va(lo) * va(hi) > 0:
+        return None                      # nessuna radice nell'intervallo
+    for _ in range(giri):
+        m = (lo + hi) / 2
+        if va(lo) * va(m) <= 0: hi = m
+        else: lo = m
+    return (lo + hi) / 2
+
+
+def rendimento(fs, tot_eur, oggi):
+    """IRR annuo e giorni, RICALCOLATI a ogni giro sui conferimenti datati.
+
+    Fino al 02.10.2026 l'IRR era un numero fermo dentro flussi_sintesi: valeva al
+    24.08.2026 e nessuno lo aggiornava, quindi invecchiava di un giorno al giorno.
+    I conferimenti in franchi sono gia convertiti al cambio del GIORNO in cui sono
+    entrati, non a quello di oggi: vedi flussi_sintesi.esterni_eur."""
+    if not fs or not fs.get('esterni_eur'):
+        return fs.get('irr') if fs else None, fs.get('giorni') if fs else None, None
+    fl = [(date.fromisoformat(x['d']), -x['eur']) for x in fs['esterni_eur']]
+    conferito = sum(x['eur'] for x in fs['esterni_eur'])
+    fl.append((oggi, tot_eur))
+    return xirr(fl), (oggi - min(d for d, _ in fl)).days, conferito
+
+
 def date_riferimento(oggi):
     """Le tre date da cui si misura, scelte per CALENDARIO e non per posizione nella
     serie. La versione precedente prendeva l'ultimo punto disponibile come base del
@@ -311,6 +342,12 @@ body{background:var(--plane);color:var(--ink);font:400 15px/1.45 -apple-system,B
 .delta{display:flex;align-items:center;gap:7px;font-size:14.5px;font-weight:600;flex-wrap:wrap}
 .chip{font-size:11px;font-weight:600;padding:2.5px 7px;border-radius:6px;background:var(--surface-2);color:var(--ink-2)}
 .accr{display:flex;justify-content:space-between;margin-top:9px;padding-top:9px;border-top:1px solid var(--grid);font-size:11.5px;color:var(--muted)}
+.irr{display:flex;align-items:baseline;gap:12px;margin-top:11px;padding:10px 12px;
+     background:var(--surface-2);border-radius:10px}
+.irrv{font-size:26px;font-weight:700;letter-spacing:-.6px;line-height:1;white-space:nowrap}
+.irrv small{font-size:12px;font-weight:600;letter-spacing:0;margin-left:2px}
+.irrd{display:flex;flex-direction:column;gap:2px;min-width:0}
+.irrd .num{font-size:10.5px;color:var(--muted)}
 .accr b{color:var(--ink-2);font-weight:650}
 .vhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px}
 .vcur{font-size:18px;font-weight:700;letter-spacing:.5px}
@@ -464,7 +501,8 @@ def render(B, FX, FXP, oggi, ora, pos, per, storico, fs=None, dcus=None):
 <div class="hero num">{f(tot_eur)} <small>EUR</small></div>
 <div class="delta"><span class="{k(d_eur)} num">{'▲' if d_eur>=0 else '▼'} {f(abs(d_eur))} EUR</span>
 <span class="{k(d_eur)} num">{p(d_pct)}%</span>
-<span class="chip num">da inizio {f(pl_eur, '+')} EUR</span>{f'<span class="chip num">IRR {p(fs["irr"])}% ann.</span>' if fs else ''}</div>
+<span class="chip num">da inizio {f(pl_eur, '+')} EUR</span></div>
+{irr_blocco(fs, tot_eur, oggi)}
 <table class="num" style="margin-top:11px">
 <tr><th>Rendimento EUR</th><th>Inizio</th><th>1G</th><th>MTD</th><th>QTD</th><th>YTD</th></tr>
 <tr class="tot" style="border-top:1px solid var(--grid)"><td>Totale portafoglio</td>
@@ -474,7 +512,7 @@ def render(B, FX, FXP, oggi, ora, pos, per, storico, fs=None, dcus=None):
 <td class="{k(per.get('YTD'))}">{p(per.get('YTD'))}</td></tr></table>
 <div class="cmt cmt0">{attribuzione(B, FX)}</div>
 <div class="accr"><span>CHF/EUR <b class="num">{FX['CHF']:.4f}</b> <span class="w">EUR/CHF {1/FX['CHF']:.4f}</span> · USD/EUR <b class="num">{FX['USD']:.4f}</b></span>
-<span class="num">su {f(netto)} conferiti{f" · {fs['giorni']} giorni" if fs else ""}</span></div></div>''')
+<span class="num">su {f(netto)} conferiti{f" · {rendimento(fs, tot_eur, oggi)[1]} giorni" if fs and fs.get('esterni_eur') else ""}</span></div></div>''')
     al = allerta(B, FX, FXP, dcus, pos)
     if al: h.append(al)
     for v in ['CHF', 'EUR', 'USD']:
@@ -516,6 +554,19 @@ l'Obbligazionario CHF e USD sono nati il 25.08.2026, le Materie prime CHF il 09.
 
 
 # ───────────────────── commenti generati dai numeri ─────────────────────
+def irr_blocco(fs, tot_eur, oggi):
+    """L'IRR in grande sotto il patrimonio. Era un chip da 11px in mezzo ad altri
+    tre: il numero che risponde a "quanto sta rendendo" merita di piu."""
+    r, gg, cfr = rendimento(fs, tot_eur, oggi)
+    if r is None:
+        return ''
+    anni = gg / 365.0 if gg else 0
+    return (f'<div class="irr"><div class="irrv num {k(r)}">{p(r)}<small>% annuo</small></div>'
+            f'<div class="irrd"><span class="lbl">Rendimento monetario</span>'
+            f'<span class="num">{f(cfr)} EUR conferiti · {gg} giorni · {anni:.2f} anni</span>'
+            f'</div></div>')
+
+
 def attribuzione(B, FX, n=3):
     """Chi ha mosso il portafoglio oggi. Due grandezze diverse, quindi due unita
     esplicite: l'euro dice quanto ha spostato il patrimonio, la percentuale
@@ -672,6 +723,8 @@ CSS_APP = """
 .sday span{display:block;font-size:9.5px;font-weight:500;color:var(--muted);letter-spacing:.04em}
 .per{display:flex;gap:5px;margin-top:9px}
 .per div{flex:1;background:var(--surface);border-radius:9px;padding:6px 4px;text-align:center}
+.per .irrcell{flex:1.35;background:var(--surface-2);outline:1px solid var(--rule)}
+.per .irrcell b{font-size:14.5px}
 .per b{display:block;font-size:12.5px;font-weight:650;font-variant-numeric:tabular-nums}
 .per span{font-size:8.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .tabs{display:flex;gap:4px;overflow-x:auto;padding:9px 0 2px;margin:0 -12px;padding-left:12px;
@@ -698,6 +751,7 @@ def render_app(B, FX, FXP, oggi, ora, pos, per, fs=None, dcus=None):
     d_eur = tot - prev; d_pct = d_eur / prev if prev else 0
     netto = fs['netto'] if fs else 0
     ini = (tot / netto - 1) if netto else None
+    irr_r, gg, cfr = rendimento(fs, tot, oggi)
 
     al = allerta(B, FX, FXP, dcus, pos)
     n_al = al.count('class="al"')
@@ -716,6 +770,7 @@ def render_app(B, FX, FXP, oggi, ora, pos, per, fs=None, dcus=None):
       {'▲' if d_eur>=0 else '▼'} {f(abs(d_eur))} · {p(d_pct)}%</div>
   </div>
   <div class="per num">
+    <div class="irrcell"><span>IRR annuo</span><b class="{k(irr_r)}">{p(irr_r)}</b></div>
     <div><span>Inizio</span><b class="{k(ini)}">{p(ini)}</b></div>
     <div><span>MTD</span><b class="{k(per.get('MTD'))}">{p(per.get('MTD'))}</b></div>
     <div><span>QTD</span><b class="{k(per.get('QTD'))}">{p(per.get('QTD'))}</b></div>
@@ -749,7 +804,7 @@ def render_app(B, FX, FXP, oggi, ora, pos, per, fs=None, dcus=None):
 <div class="card"><h2>Il movimento di oggi</h2>
 <div style="font-size:12px;color:var(--ink-2);line-height:1.5">{attribuzione(B, FX)}</div>
 <div class="accr"><span>CHF/EUR <b class="num">{FX['CHF']:.4f}</b> <span class="w">EUR/CHF {1/FX['CHF']:.4f}</span> · USD/EUR <b class="num">{FX['USD']:.4f}</b></span>
-<span class="num">IRR {p(fs['irr'])}% ann.{f" · {fs['giorni']} gg" if fs else ""}</span></div></div>
+<span class="num">conferiti {f(cfr) if cfr else '—'} EUR · {gg if gg else '—'} gg</span></div></div>
 <div class="card"><h2>Come è ripartito</h2><div class="bar">''')
     for cat in ORD:
         if not S.get(cat): continue
