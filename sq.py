@@ -502,7 +502,7 @@ def scheda(v, b, tot_eur, per, cmt=''):
     h.append('</div>')
     return ''.join(h)
 
-def render(B, FX, FXP, oggi, ora, pos, per, storico, fs=None, dcus=None):
+def render(B, FX, FXP, oggi, ora, pos, per, storico, fs=None, dcus=None, oss=None):
     dcus = dcus or {}
     tot_eur  = sum(b['val_eur'] for b in B.values())
     prev_eur = sum(b['prev_eur'] for b in B.values())
@@ -562,7 +562,8 @@ def render(B, FX, FXP, oggi, ora, pos, per, storico, fs=None, dcus=None):
         if not S.get(cat): continue
         h.append(f'<span><span class="dot" style="background:var({COL[cat]})"></span>{cat} {f(S[cat])}</span>')
     h.append('</div></div>')
-    h.append(sez_fisco(pos))
+    h.append(sez_fisco(pos, fs))
+    h.append(osservatorio(oss))
     h.append(f'''<p class="note">
 <b>Inizio</b>: P&amp;L sul capitale investito, cassa inclusa e realizzi compresi ({f(real,'+')} EUR dalle chiusure del 21.08).<br>
 <b>Obbligazionario</b> a costo ammortizzato sul rendimento di carico, mai a mercato.<br>
@@ -720,7 +721,30 @@ def allerta(B, FX, FXP, dcus, pos):
 
 
 # ───────────────────── posizione fiscale su cedole e dividendi ─────────────────────
-def sez_fisco(pos):
+MINIERE = {'FCX': 'Freeport-McMoRan', 'NEM': 'Newmont',
+           'ABX': 'Barrick Mining · Toronto', 'B': 'Barrick Mining · New York'}
+
+
+def osservatorio(oss):
+    """Gold miners: NON sono in portafoglio e non entrano in nessun totale. Stanno
+    nella watchlist Swissquote e il report li espone perche Marco li guarda. Il 1G e
+    calcolato sulla serie propria dell'osservatorio, non sulla variazione dichiarata
+    dal CSV, che su parecchie righe e vuota."""
+    if not oss: return ''
+    h = ['<div class="card"><h2>Gold miners · osservatorio</h2>',
+         '<table class="num"><tr><th></th><th>Ultimo</th><th>1G</th></tr>']
+    for r in oss:
+        d = (r['px'] / r['prev'] - 1) if r.get('prev') else None
+        h.append(f'''<tr class="cat"><td>{r['tk']}<br><span class="w">{r['nome']}</span></td>
+<td>{f(r['px'])}<br><span class="w">{r['val']}</span></td>
+<td class="{k(d)}">{p(d) if d is not None else '—'}</td></tr>''')
+    h.append('</table><div class="crtnote">Non sono in portafoglio: nessuno di questi '
+             'numeri entra nel patrimonio, nei blocchi o nel rendimento. ABX e B sono '
+             'la stessa societa su due borse, in valute diverse.</div></div>')
+    return ''.join(h)
+
+
+def sez_fisco(pos, fs=None):
     """Ritenute gia subite sugli incassi, divise per quello che torna indietro e
     quello che resta. Serve a leggere il rendimento in due modi: al netto come lo
     vedi sul conto, e al lordo del recuperabile, che e il rendimento vero se la
@@ -750,6 +774,13 @@ def sez_fisco(pos):
     us_l, us_t = t.get('us_lordo_usd', 0), t.get('us_trattenuto_usd', 0)
     al = f' <span class="w">{us_t/us_l*100:.0f}% su {us_l:.2f} USD lordi</span>' if us_l else ''
     h.append(f'<tr class="it"><td>USA su dividendi</td><td>{f(c_us)}</td><td class="w">{al}</td></tr>')
+    if fs and (fs.get('prelevato') or fs.get('costi_conto')):
+        h.append(f'<tr class="cat sep"><td>Costi di conto</td>'
+                 f'<td class="dn">−{f(fs.get("costi_conto", 0))}</td>'
+                 f'<td class="w">custodia, estratto fiscale · dentro il rendimento</td></tr>')
+        h.append(f'<tr class="cat"><td>Prelievi personali</td>'
+                 f'<td>−{f(fs.get("prelevato", 0))}</td>'
+                 f'<td class="w">carta di debito · fuori dal rendimento</td></tr>')
     h.append('</table>')
     if us_l and us_t / us_l > 0.20:
         h.append('<div class="crtnote">Sui dividendi USA e trattenuto il '
@@ -791,7 +822,7 @@ CSS_APP = """
 @media (prefers-reduced-motion:reduce){.tab{transition:none}}
 """
 
-def render_app(B, FX, FXP, oggi, ora, pos, per, fs=None, dcus=None):
+def render_app(B, FX, FXP, oggi, ora, pos, per, fs=None, dcus=None, oss=None):
     """Stessi numeri, ma organizzati per la consultazione: intestazione sempre
     visibile e un pannello per volta invece di una colonna unica."""
     dcus = dcus or {}
@@ -835,6 +866,8 @@ def render_app(B, FX, FXP, oggi, ora, pos, per, fs=None, dcus=None):
     if cert:
         cls, _ = fascia(peggior) if peggior is not None else ('good', '')
         tabs.append(('cert', 'Certificati', f'<span class="pip" style="background:var(--{cls})"></span>'))
+    if oss:
+        tabs.append(('oro', 'Gold miners', ''))
     if al:
         tabs.append(('alert', f'Da guardare', f'<span class="pip" style="background:var(--warn)"></span>'))
 
@@ -873,7 +906,7 @@ def render_app(B, FX, FXP, oggi, ora, pos, per, fs=None, dcus=None):
         h.append(f'''<tr class="cat"><td>{v}</td><td>{f(b['val_eur'])}</td>
 <td>{b['val_eur']/tot*100:.1f}%</td><td class="{k(b['d_eur'])}">{p(b['d_eur'])}</td>
 <td class="{k(pe.get('YTD'))}">{p(pe.get('YTD'))}</td></tr>''')
-    h.append('</table></div>' + sez_fisco(pos) + '</div>')
+    h.append('</table></div>' + sez_fisco(pos, fs) + '</div>')
 
     # un pannello per valuta
     for v in ['CHF', 'EUR', 'USD']:
@@ -882,6 +915,9 @@ def render_app(B, FX, FXP, oggi, ora, pos, per, fs=None, dcus=None):
                  + scheda(v, B[v], tot, per, attrib_blocco(B[v], v)) + '</div>')
     if cert:
         h.append(f'<div class="panel" id="p-cert" role="tabpanel" aria-labelledby="t-cert" hidden>{cert}</div>')
+    if oss:
+        h.append('<div class="panel" id="p-oro" role="tabpanel" aria-labelledby="t-oro" '
+                 'hidden>' + osservatorio(oss) + '</div>')
     if al:
         h.append(f'<div class="panel" id="p-alert" role="tabpanel" aria-labelledby="t-alert" hidden>{al}</div>')
 
@@ -985,13 +1021,24 @@ def main():
     Per = periodi(B, tot, D['riferimenti'], oggi)
     S_new, dcus = serie(B, oggi, FX, S_prec, tot)
 
+    # Osservatorio gold miners: watchlist, non portafoglio. Serie propria in
+    # D['_watchlist'], perche questi ticker non stanno in D['serie'].
+    WL = pz.get('_watchlist') or {}
+    stor = D.setdefault('_watchlist', {})
+    gp = [g for g in sorted(stor) if g < oggi.isoformat()]
+    pre = stor.get(gp[-1], {}) if gp else {}
+    oss = [{'tk': t, 'nome': n, 'px': WL[t]['px'], 'val': WL[t].get('val', '?'),
+            'prev': pre.get(t)} for t, n in MINIERE.items() if t in WL]
+    stor[oggi.isoformat()] = {t: WL[t]['px'] for t in MINIERE if t in WL}
+    for g in sorted(stor)[:-40]: stor.pop(g)
+
     html = render(B, FX, FXP, oggi, ora, pos,
                           {k: Per['TOT'][k] for k in ('MTD', 'QTD', 'YTD')},
-                          None, D.get('flussi_sintesi'), dcus)
+                          None, D.get('flussi_sintesi'), dcus, oss)
     open(P('report.html'), 'w').write(html)
     per3 = {x: Per['TOT'][x] for x in ('MTD', 'QTD', 'YTD')}
     open(P('app.html'), 'w').write(
-        render_app(B, FX, FXP, oggi, ora, pos, per3, D.get('flussi_sintesi'), dcus))
+        render_app(B, FX, FXP, oggi, ora, pos, per3, D.get('flussi_sintesi'), dcus, oss))
     D['serie'] = S_new
     json.dump(D, open(P('dati.json'), 'w'), ensure_ascii=False, separators=(',', ':'))
 

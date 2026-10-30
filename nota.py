@@ -42,12 +42,22 @@ B = []; tot_amm = tot_mkt = 0.0; dur_w = val_w = ced_w = ytm_w = 0.0
 agg = {}
 for b in pos['bond']:
     nom = sum(x['nom'] for x in b['tranche']); pag = sum(x['pagato'] for x in b['tranche'])
-    mat = date.fromisoformat(b['mat']); acq = date.fromisoformat(min(x['d'] for x in b['tranche']))
+    mat = date.fromisoformat(b['mat'])
     t   = (mat - oggi).days / 365
-    y_c = sq.ytm(pag / nom * 100, acq, mat, b['cedola'], b['freq'])
+    # Accrual PER TRANCHE, come sq.py: ogni lotto ha il suo rendimento di carico e il
+    # suo valore attuale. Fino al 30.10.2026 qui si scontava il nominale aggregato con
+    # un solo YTM ricavato dal prezzo medio, e il book usciva 133 EUR piu basso di
+    # quello del report (02.10.2026: 535'553 contro 535'686). Il valore-peso dei
+    # rendimenti e la stessa media che il report stampa nella colonna YTM.
+    v_amm = 0.0; yw = 0.0
+    for x in b['tranche']:
+        dx = date.fromisoformat(x['d'])
+        yx = sq.ytm(x['pagato'] / x['nom'] * 100, dx, mat, b['cedola'], b['freq'])
+        vx = sq.val_accrual(x['pagato'], x['nom'], yx, max(oggi, dx), mat, b['cedola'], b['freq'])
+        v_amm += vx; yw += yx * vx
+    y_c = yw / v_amm if v_amm else 0.0
     k   = b['nome'].split()[0]
     y_m = (CUR[b['val']]['f'](t) + SPR.get(k, 30) / 100) / 100
-    v_amm = sq.val_accrual(pag, nom, y_c, oggi, mat, b['cedola'], b['freq'])
     fl    = [(x, cf) for x, cf in sq._cedole(oggi, mat, b['cedola'], b['freq']) if x > oggi]
     v_mkt = sum(cf / (1 + y_m) ** ((x - oggi).days / 365) for x, cf in fl) * nom / 100
     fx    = FXR[b['val']]
