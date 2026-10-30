@@ -472,7 +472,7 @@ def scheda(v, b, tot_eur, per, cmt=''):
                 h.append(f'''<tr class="it"><td>{it['nome']}</td><td colspan="{7 if mk else 6}" style="text-align:right;color:var(--warn)">prezzo non recuperato</td></tr>'''); continue
             extra = ''
             if it.get('ytm') is not None and cat == 'Obbligazionario':
-                extra = f'<span class="w"> {it["ytm"]*100:.2f}%</span>'
+                extra = f'<span class="w"> {it["ytm"]*100:.2f}%</span>' + rating_breve(it['nome'])
                 if it.get('incassato'): extra += f'<span class="w"> · incassate {f(it["incassato"])}</span>'
             if it.get('nav'): extra = f'<span class="w"> NAV {it["nav"]:.2f}</span>'
             if it.get('cuscino') is not None: extra = f'<span class="w"> barriera −{it["cuscino"]*100:.0f}%</span>'
@@ -721,6 +721,24 @@ def allerta(B, FX, FXP, dcus, pos):
 
 
 # ───────────────────── posizione fiscale su cedole e dividendi ─────────────────────
+RATING = {}          # riempito da main() con posizioni.rating.emittenti
+
+
+def rating_breve(nome):
+    """Il rating dell'emittente accanto al nome del bond. Chiave = primo token del
+    nome, la stessa convenzione con cui nota.py cerca gli spread creditizi. Si stampa
+    S&P se c'e, altrimenti Moody's: due sigle sulla stessa riga non ci stanno su un
+    telefono, e la tabella completa a tre agenzie sta in dati/rating.json."""
+    r = RATING.get(nome.split()[0])
+    if not r: return ''
+    sp, mo = r.get('sp') or '', r.get('moodys') or ''
+    vuoti = ('n.d.', 'da verificare', 'non quotato', '')
+    v = sp if sp not in vuoti else (mo if mo not in vuoti else '')
+    if not v:
+        v = 'senza rating' if sp == 'non quotato' else 'rating n.d.'
+    return f'<span class="w"> · {v}</span>'
+
+
 MINIERE = {'FCX': 'Freeport-McMoRan', 'NEM': 'Newmont',
            'ABX': 'Barrick Mining · Toronto', 'B': 'Barrick Mining · New York'}
 
@@ -963,6 +981,8 @@ def main():
 
     D   = load('dati.json') or {}
     pos = D['posizioni']; pz = load('prezzi2.json')
+    global RATING
+    RATING = (pos.get('rating') or {}).get('emittenti', {})
     S_prec = D.get('serie', {})
 
     # ── rete di sicurezza: prezzo assente o fuori scala -> uso l'ultimo buono ──
