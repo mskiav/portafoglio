@@ -60,8 +60,12 @@ def build(pos, prezzi, oggi, costo_eur=None):
     FXP  = prezzi.get('_fx_prev', FX)
     fx   = lambda c, f=None: 1.0 if c == 'EUR' else (f or FX).get(c, 0)
 
+    # `dmkt` e la somma di (valore a mercato - valore ad accrual) sui soli bond.
+    # NON entra nel patrimonio: il patrimonio resta ad accrual, com'e sempre stato,
+    # perche le serie TWR, l'indice base 100 e l'IRR sono costruiti su quella base e
+    # cambiarla significherebbe rifare la storia. Serve solo a esporre lo scarto.
     B = {v: {'cat': {}, 'titoli': [], 'val': 0.0, 'prev': 0.0, 'costo': 0.0,
-             'costo_cash': 0.0, 'val_cash': 0.0} for v in pos['blocchi']}
+             'costo_cash': 0.0, 'val_cash': 0.0, 'dmkt': 0.0} for v in pos['blocchi']}
 
     def add(v, cat, nome, val, prev, costo, extra=None):
         b = B[v]
@@ -71,6 +75,10 @@ def build(pos, prezzi, oggi, costo_eur=None):
         r = {'nome': nome, 'val': val, 'prev': prev, 'costo': costo,
              'd': (val / prev - 1) if prev else 0.0}
         if extra: r.update(extra)
+        if r.get('mkt') is not None:
+            dm = r['mkt'] - val
+            c['dmkt'] = c.get('dmkt', 0.0) + dm
+            b['dmkt'] += dm
         # le cedole staccate escono dal valore del titolo ma restano in cassa:
         # senza rimetterle nel conto, un titolo che ha pagato risulta in perdita
         r['inizio'] = ((val + r.get('incassato', 0)) / costo - 1) if costo else 0.0
@@ -94,9 +102,13 @@ def build(pos, prezzi, oggi, costo_eur=None):
             ieri = max(oggi - timedelta(days=1), d)
             prv = val_accrual(pag, t['nom'], y, ieri, mat, b['cedola'], b['freq'])
             sv += val; sp += prv; sc += pag; sw += y * val
+        # prezzo di mercato dal file della banca, abbinato per ISIN (il nome e
+        # troncato e non si puo usare come chiave). Se manca, la riga resta senza
+        # colonna mercato invece di inventarsela.
+        pmk = (prezzi.get('_bond_mkt') or {}).get(b.get('isin'))
         add(v, 'Obbligazionario', b['nome'], sv, sp, sc,
             {'ytm': sw / sv if sv else 0, 'nom': nom, 'mat': b['mat'],
-             'incassato': inc_b,
+             'incassato': inc_b, 'mkt': (pmk * nom) if pmk else None,
              'rateo': rateo(oggi, mat, b['cedola'], b['freq'], nom)})
         ytm_w[v] += sw
 
@@ -348,6 +360,10 @@ body{background:var(--plane);color:var(--ink);font:400 15px/1.45 -apple-system,B
 .irrv small{font-size:12px;font-weight:600;letter-spacing:0;margin-left:2px}
 .irrd{display:flex;flex-direction:column;gap:2px;min-width:0}
 .irrd .num{font-size:10.5px;color:var(--muted)}
+.mkt{display:flex;flex-direction:column;gap:2px;margin-top:9px;padding-top:9px;
+     border-top:1px solid var(--grid)}
+.mkt .num{font-size:11px;color:var(--muted)}
+.mkt .num b{color:var(--ink-2);font-weight:650}
 .accr b{color:var(--ink-2);font-weight:650}
 .vhead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px}
 .vcur{font-size:18px;font-weight:700;letter-spacing:.5px}
@@ -427,7 +443,15 @@ def scheda(v, b, tot_eur, per, cmt=''):
 <span class="vtot num">{f(b['val_eur'])} <span style="font-size:11px;color:var(--ink-2);font-weight:500">EUR</span></span></div>
 <div class="vsub"><span class="num">{f(b['val'])} {v} · {b['val_eur']/tot_eur*100:.1f}% del patrimonio</span>
 <span class="num {k(b['d_loc'])}">{'▲' if b['d_loc']>=0 else '▼'} {p(b['d_loc'])}%</span></div>
-<div class="tw"><table class="num"><tr><th></th><th>Valore {v}</th><th>Inizio</th><th>1G</th><th>MTD</th><th>QTD</th><th>YTD</th></tr>''']
+<div class="tw"><table class="num"><tr><th></th><th>Valore {v}</th>{'<th>A mercato</th>' if abs(b.get('dmkt') or 0) > 0.005 else ''}<th>Inizio</th><th>1G</th><th>MTD</th><th>QTD</th><th>YTD</th></tr>''']
+    # Colonna a mercato: solo sui blocchi che hanno bond. Il valore a mercato NON entra
+    # nei totali ne nei periodi — quelli restano ad accrual — e nemmeno nel 1G: un book
+    # che porti a scadenza non deve avere quindici righe che ballano ogni giorno.
+    mk = abs(b.get('dmkt') or 0) > 0.005
+    def tdm(val, dm):
+        if not mk: return ''
+        if dm is None: return '<td class="w">—</td>'
+        return (f'<td>{f(val + dm)}<br><span class="w {k(dm)}">{f(dm, "+")}</span></td>')
     celcat = lambda d: ''.join(
         (f'<td class="{k(d[x])}">{p(d[x])}</td>' if d.get(x) is not None
          else '<td class="w">—</td>') for x in ('MTD', 'QTD', 'YTD'))
@@ -441,11 +465,11 @@ def scheda(v, b, tot_eur, per, cmt=''):
         ini = c.get('inizio_eur') if cat == 'Cash' else c['inizio']
         sep = '' if first else ' sep'; first = False
         h.append(f'''<tr class="cat{sep}"><td><span class="dot" style="background:var({COL[cat]})"></span>{cat}<br><span class="w">{sub}</span></td>
-<td>{f(c['val'])}</td><td class="{k(ini)}">{p(ini)}</td><td class="{k(c['d'])}">{p(c['d'])}</td>
+<td>{f(c['val'])}</td>{tdm(c['val'], c.get('dmkt'))}<td class="{k(ini)}">{p(ini)}</td><td class="{k(c['d'])}">{p(c['d'])}</td>
 {celcat(c.get('per') or {})}</tr>''')
         for it in sorted(c['it'], key=lambda x: -x['val'])[:6]:
             if it.get('manca'):
-                h.append(f'''<tr class="it"><td>{it['nome']}</td><td colspan="6" style="text-align:right;color:var(--warn)">prezzo non recuperato</td></tr>'''); continue
+                h.append(f'''<tr class="it"><td>{it['nome']}</td><td colspan="{7 if mk else 6}" style="text-align:right;color:var(--warn)">prezzo non recuperato</td></tr>'''); continue
             extra = ''
             if it.get('ytm') is not None and cat == 'Obbligazionario':
                 extra = f'<span class="w"> {it["ytm"]*100:.2f}%</span>'
@@ -453,19 +477,21 @@ def scheda(v, b, tot_eur, per, cmt=''):
             if it.get('nav'): extra = f'<span class="w"> NAV {it["nav"]:.2f}</span>'
             if it.get('cuscino') is not None: extra = f'<span class="w"> barriera −{it["cuscino"]*100:.0f}%</span>'
             h.append(f'''<tr class="it"><td>{breve(it['nome'])[:24]}{extra}</td><td>{f(it['val'])}</td>
+{tdm(it['val'], (it['mkt'] - it['val']) if it.get('mkt') is not None else None)}
 <td class="{k(it['inizio'])}">{p(it['inizio'])}</td><td class="{k(it['d'])}">{p(it['d'])}</td><td colspan="3"></td></tr>''')
     pl, pe = b.get('per_loc') or {}, b.get('per_eur') or {}
     cel = lambda d: ''.join(f'<td class="{k(d.get(x))}">{p(d.get(x))}</td>' for x in ('MTD','QTD','YTD'))
-    h.append(f'''<tr class="tot"><td>Totale in {v}</td><td>{f(b['val'])}</td>
+    h.append(f'''<tr class="tot"><td>Totale in {v}</td><td>{f(b['val'])}</td>{tdm(b['val'], b.get('dmkt'))}
 <td class="{k(b['inizio_tot'])}">{p(b['inizio_tot'])}</td><td class="{k(b['d_loc'])}">{p(b['d_loc'])}</td>
 {cel(pl)}</tr>''')
     if v != 'EUR':
         fxp = {x: (pe.get(x) - pl.get(x)) if (pe.get(x) is not None and pl.get(x) is not None) else None
                for x in ('MTD','QTD','YTD')}
-        h.append(f'''<tr class="eur"><td>letto in EUR</td><td>{f(b['val_eur'])}</td>
+        fxb = b['val_eur'] / b['val'] if b['val'] else 1.0
+        h.append(f'''<tr class="eur"><td>letto in EUR</td><td>{f(b['val_eur'])}</td>{tdm(b['val_eur'], (b.get('dmkt') or 0) * fxb)}
 <td class="{k(b.get('inizio_eur'))}">{p(b.get('inizio_eur'))}</td><td class="{k(b['d_eur'])}">{p(b['d_eur'])}</td>
 {cel(pe)}</tr>
-<tr class="eur"><td>di cui effetto cambio</td><td></td>
+<tr class="eur"><td>di cui effetto cambio</td><td></td>{'<td></td>' if mk else ''}
 <td class="{k((b.get('inizio_eur') or 0)-b['inizio_tot']) if b.get('inizio_eur') is not None else 'nd'}">{p((b['inizio_eur']-b['inizio_tot']) if b.get('inizio_eur') is not None else None)}</td>
 <td class="{k(b['fx_eff'])}">{p(b['fx_eff'])}</td>{cel(fxp)}</tr>''')
     h.append('</table></div>')
@@ -503,6 +529,7 @@ def render(B, FX, FXP, oggi, ora, pos, per, storico, fs=None, dcus=None):
 <span class="{k(d_eur)} num">{p(d_pct)}%</span>
 <span class="chip num">da inizio {f(pl_eur, '+')} EUR</span></div>
 {irr_blocco(fs, tot_eur, oggi)}
+{mercato_riga(B, FX, tot_eur)}
 <table class="num" style="margin-top:11px">
 <tr><th>Rendimento EUR</th><th>Inizio</th><th>1G</th><th>MTD</th><th>QTD</th><th>YTD</th></tr>
 <tr class="tot" style="border-top:1px solid var(--grid)"><td>Totale portafoglio</td>
@@ -565,6 +592,28 @@ def irr_blocco(fs, tot_eur, oggi):
             f'<div class="irrd"><span class="lbl">Rendimento monetario</span>'
             f'<span class="num">{f(cfr)} EUR conferiti · {gg} giorni · {anni:.2f} anni</span>'
             f'</div></div>')
+
+
+def mercato_riga(B, FX, tot_eur):
+    """Una riga sola: quanto vale il book obbligazionario a mercato invece che a costo
+    ammortizzato. Il patrimonio sopra resta ad accrual — questo e lo scarto che la
+    banca vede e il report no, ed e anche la voce che spiega quasi tutta la differenza
+    nel controllo di correttezza contro l'estratto."""
+    dm = sum((b.get('dmkt') or 0) * (b['val_eur'] / b['val'] if b['val'] else 1)
+             for b in B.values())
+    if abs(dm) < 0.5:
+        return ''
+    # Denominatore: i SOLI titoli che hanno un prezzo di mercato. La categoria
+    # Obbligazionario contiene anche il deposito a termine, che un prezzo non ce l'ha:
+    # metterlo dentro diluirebbe la percentuale senza motivo.
+    obb = sum(it['val'] * (b['val_eur'] / b['val'] if b['val'] else 1)
+              for b in B.values()
+              for it in b['cat'].get('Obbligazionario', {}).get('it', [])
+              if it.get('mkt') is not None)
+    return (f'<div class="mkt"><span class="lbl">Obbligazionario a mercato</span>'
+            f'<span class="num">{f(obb)} a costo ammortizzato · '
+            f'<b>{f(obb + dm)}</b> a prezzi della banca · '
+            f'<span class="{k(dm)}">{f(dm, "+")} EUR ({p(dm / obb)}%)</span></span></div>')
 
 
 def attribuzione(B, FX, n=3):
@@ -803,6 +852,7 @@ def render_app(B, FX, FXP, oggi, ora, pos, per, fs=None, dcus=None):
     h.append(f'''<div class="panel" id="p-sintesi" role="tabpanel" aria-labelledby="t-sintesi">
 <div class="card"><h2>Il movimento di oggi</h2>
 <div style="font-size:12px;color:var(--ink-2);line-height:1.5">{attribuzione(B, FX)}</div>
+{mercato_riga(B, FX, tot)}
 <div class="accr"><span>CHF/EUR <b class="num">{FX['CHF']:.4f}</b> <span class="w">EUR/CHF {1/FX['CHF']:.4f}</span> · USD/EUR <b class="num">{FX['USD']:.4f}</b></span>
 <span class="num">conferiti {f(cfr) if cfr else '—'} EUR · {gg if gg else '—'} gg</span></div></div>
 <div class="card"><h2>Come è ripartito</h2><div class="bar">''')
